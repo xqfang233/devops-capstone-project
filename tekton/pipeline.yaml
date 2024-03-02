@@ -15,20 +15,15 @@ spec:
     - name: repo-url
     - name: branch
       default: main
+    - name: build-image
   tasks:
     - name: init
       workspaces:
         - name: source
           workspace: pipeline-workspace          
       taskRef:
-        name: flake8
-      params:
-      - name: image
-        value: "python:3.9-slim"
-      - name: args
-        value: ["--count","--max-complexity=10","--max-line-length=127","--statistics"]
-      runAfter:
-        - clone
+        name: cleanup
+
     - name: clone
       workspaces:
         - name: output
@@ -42,6 +37,7 @@ spec:
         value: $(params.branch)
       runAfter:
         - init
+
     - name: lint
       workspaces:
         - name: source
@@ -55,6 +51,7 @@ spec:
         value: ["--count","--max-complexity=10","--max-line-length=127","--statistics"]
       runAfter:
         - clone
+
     - name: tests
       workspaces:
         - name: source
@@ -68,5 +65,71 @@ spec:
         value: "-v --with-spec --spec-color"
       runAfter:
         - clone
-    
-    
+
+    - name: build
+      workspaces:
+        - name: source
+          workspace: pipeline-workspace
+      taskRef:
+        name: buildah
+        kind: ClusterTask
+      params:
+      - name: IMAGE
+        value: "$(params.build-image)"
+      runAfter:
+        - tests
+        - lint
+
+    - name: deploy
+      workspaces:
+        - name: manifest-dir
+          workspace: pipeline-workspace
+      taskRef:
+        name: openshift-client
+        kind: ClusterTask
+      params:
+      - name: SCRIPT
+        value: |
+          echo "Updating manifest..."
+          sed -i "s|IMAGE_NAME_HERE|$(params.build-image)|g" deploy/deployment.yaml
+          cat deploy/deployment.yaml
+          echo "Deploying to OpenShift..."
+          oc apply -f deploy/
+          oc get pods -l app=accounts
+      runAfter:
+        - build
+---
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: nose
+spec:
+  description: This task will run nosetests on the provided input.
+  workspaces:
+    - name: source
+  params:
+    - name: args
+      description: Arguments to pass to nose
+      type: string
+      default: "-v"
+    - name: database_uri
+      description: Database connection string
+      type: string
+      default: "sqlite:///test.db"
+  steps:
+    - name: nosetests
+      image: python:3.9-slim
+      workingDir: $(workspaces.source.path)
+      env:
+        - name: DATABASE_URI
+          value: $(params.database_uri)
+      script: |
+        #!/bin/bash
+        set -e
+
+        echo "***** Installing dependencies *****"
+        python -m pip install --upgrade pip wheel
+        pip install -qr requirements.txt
+
+        echo "***** Running nosetests with: $(params.args)"
+        nosetests $(params.args)
